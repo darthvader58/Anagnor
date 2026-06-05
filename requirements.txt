@@ -1,0 +1,10 @@
+torch
+torchvision
+numpy
+pandas
+opencv-python
+netCDF4
+matplotlib
+seaborn
+geopandas
+cartopy

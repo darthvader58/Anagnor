@@ -1,51 +1,107 @@
+"""Train the Anagnor landslide classifier.
+
+Logs per-epoch train/val loss and accuracy to `checkpoints/metrics.json`, which
+visualize.py reads to plot the training-vs-validation curves.
+"""
+
+import argparse
+import json
+import os
+
 import torch
 import torch.nn as nn
-from torch.utils.data import Dataset, DataLoader
-import pandas as pd
+import torch.optim as optim
+from torch.utils.data import DataLoader, random_split
 
 from datasetGenerator import CustomDataset
 from model import AnagnorModel
 
 
-device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-
-traindataset = CustomDataset()
-trainloader = torch.utils.data.DataLoader(traindataset, batch_size=8,
-                                         shuffle=False, num_workers=2)
+def _accuracy(logits: torch.Tensor, labels: torch.Tensor) -> float:
+    preds = (torch.sigmoid(logits) >= 0.5).float()
+    return (preds == labels).float().mean().item()
 
 
-net = AnagnorModel().to(device)
+def run_epoch(net, loader, criterion, optimizer, device, train: bool):
+    net.train(train)
+    total_loss, total_acc, n_batches = 0.0, 0.0, 0
 
-import torch.optim as optim
+    with torch.set_grad_enabled(train):
+        for inputs, labels in loader:
+            inputs, labels = inputs.to(device), labels.to(device)
 
-criterion = nn.MSELoss()
-optimizer = optim.SGD(net.parameters(), lr=0.001, momentum=0.9)
+            if train:
+                optimizer.zero_grad()
+            logits = net(inputs)
+            loss = criterion(logits, labels)
+            if train:
+                loss.backward()
+                optimizer.step()
 
-for epoch in range(2):  # loop over the dataset multiple times
+            total_loss += loss.item()
+            total_acc += _accuracy(logits, labels)
+            n_batches += 1
 
-    running_loss = 0.0
-    for i, data in enumerate(trainloader, 0):
-        # get the inputs; data is a list of [inputs, labels]
-        inputs, labels = data
-        inputs, labels = inputs.to(device), labels.to(device)
-        # zero the parameter gradients
-        optimizer.zero_grad()
+    return total_loss / max(n_batches, 1), total_acc / max(n_batches, 1)
 
-        # forward + backward + optimize
-        outputs = net(inputs)
-        loss = criterion(outputs, labels)
-        loss.backward()
-        optimizer.step()
 
-        # print statistics
-        running_loss += loss.item()
-        if i%100==99:
-            torch.save(net.state_dict(), "./checkpoints/model_{epoch}_i.pth")
+def main():
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--epochs", type=int, default=10)
+    parser.add_argument("--batch-size", type=int, default=8)
+    parser.add_argument("--lr", type=float, default=1e-3)
+    parser.add_argument("--val-split", type=float, default=0.2)
+    parser.add_argument("--checkpoint-dir", default="checkpoints")
+    parser.add_argument("--num-workers", type=int, default=2)
+    parser.add_argument("--seed", type=int, default=42)
+    args = parser.parse_args()
 
-        if i % 2000 == 1999:    # print every 2000 mini-batches
-            print('[%d, %5d] loss: %.3f' %
-                  (epoch + 1, i + 1, running_loss / 2000))
-            running_loss = 0.0
+    os.makedirs(args.checkpoint_dir, exist_ok=True)
+    torch.manual_seed(args.seed)
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
-print('Finished Training')
-torch.save(net.state_dict(), "./final_model.pth")
+    full = CustomDataset()
+    n_val = int(len(full) * args.val_split)
+    n_train = len(full) - n_val
+    train_ds, val_ds = random_split(
+        full, [n_train, n_val], generator=torch.Generator().manual_seed(args.seed)
+    )
+
+    train_loader = DataLoader(train_ds, batch_size=args.batch_size, shuffle=True, num_workers=args.num_workers)
+    val_loader = DataLoader(val_ds, batch_size=args.batch_size, shuffle=False, num_workers=args.num_workers)
+
+    net = AnagnorModel().to(device)
+    criterion = nn.BCEWithLogitsLoss()
+    optimizer = optim.SGD(net.parameters(), lr=args.lr, momentum=0.9)
+
+    history = {"train_loss": [], "train_acc": [], "val_loss": [], "val_acc": []}
+    best_val_acc = -1.0
+
+    for epoch in range(1, args.epochs + 1):
+        tr_loss, tr_acc = run_epoch(net, train_loader, criterion, optimizer, device, train=True)
+        va_loss, va_acc = run_epoch(net, val_loader, criterion, optimizer, device, train=False)
+
+        history["train_loss"].append(tr_loss)
+        history["train_acc"].append(tr_acc)
+        history["val_loss"].append(va_loss)
+        history["val_acc"].append(va_acc)
+
+        print(
+            f"epoch {epoch:3d}/{args.epochs}  "
+            f"train loss {tr_loss:.4f} acc {tr_acc:.3f}  |  "
+            f"val loss {va_loss:.4f} acc {va_acc:.3f}"
+        )
+
+        with open(os.path.join(args.checkpoint_dir, "metrics.json"), "w") as f:
+            json.dump(history, f, indent=2)
+
+        if va_acc > best_val_acc:
+            best_val_acc = va_acc
+            torch.save(net.state_dict(), os.path.join(args.checkpoint_dir, "best.pth"))
+
+    torch.save(net.state_dict(), os.path.join(args.checkpoint_dir, "final.pth"))
+    print(f"Finished training. Best val acc: {best_val_acc:.3f}")
+
+
+if __name__ == "__main__":
+    main()

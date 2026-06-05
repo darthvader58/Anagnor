@@ -139,6 +139,7 @@ cython_debug/
 
 checkpoints/
 TRMMDataset/
+plots/
 
 gistemp250.nc
 gistemp1200_GHCNv4_ERSSTv5.nc

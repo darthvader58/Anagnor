@@ -1,40 +1,143 @@
 # Anagnor
 
-Anagnor is a publicly available system to provide the users a predictive analysis of occurrence of landslides all across the world. It's a predictive model that maps and analyses land features, global precipitation patterns, uneven heating of land and tectonic activities to predict the occurrence of landslides around the globe. An easy-to-use integrated system allows anyone to seamlessly access data from the past, the present, and the future. Anagnor also allows authorities and civilians to take advance action, helping minimise the damage caused by landslides around the world. It also acts as a tool to spread awareness and leads a path to further modification and worldwide usage.
+Anagnor is a machine-learning system for **global landslide detection** that
+fuses NASA's GISTEMP 4.0 surface-temperature anomaly grids with NLDAS elevation
+and TRMM precipitation rasters. A 3D-convolutional binary classifier learns,
+from the NASA Global Landslide Catalog, whether the climatic and physiographic
+conditions around a given lat/long on a given date are consistent with a
+landslide event.
 
-Made by - 
-Yash Jha
-Shashwat Raj
-Garv Jain
-Bhavya Verma
-Rishit Yadav
-Vir Malhotra
+The repository contains the full pipeline: dataset construction from NetCDF
+sources, a PyTorch model, a training loop with train/val tracking, and a
+visualization module producing geographic and training-curve plots.
 
-# Detailed Description 
+**Authors:** Yash Jha, Shashwat Raj, Garv Jain, Bhavya Verma, Rishit Yadav, Vir Malhotra.
 
-Watch YouTube Video!
+---
+
+## Data sources
+
+| Layer | Variable | Source | File |
+|---|---|---|---|
+| Surface temperature anomaly | `tempanomaly` (15 prior monthly steps) | **NASA GISTEMP v4** (GHCN v4 + ERSST v5) | `gistemp1200_GHCNv4_ERSSTv5.nc` |
+| Elevation | `elevation` (static raster patch) | NASA NLDAS | `NLDAS.nc` |
+| IR precipitation | `IRprecipitation_cnt` (16 prior 3-day frames) | NASA TRMM 3B42 Daily v7 | `TRMMDataset/3B42_Daily.YYYYMMDD.7.nc4` |
+| Event labels | landslide events with lat/long/date | NASA Global Landslide Catalog | `datasets/nasa_global_landslide_catalog_point.csv` |
+
+GISTEMP 4.0 is the load-bearing climatic signal: monthly temperature anomalies
+on a 2°×2° grid that capture the regional warming and seasonal heating patterns
+known to destabilise slopes. Each training sample slices a 6°×6° window around
+the candidate location and stacks the prior 15 monthly anomaly maps as input
+channels.
+
+The three rasters are co-registered to a 1024×1024 patch and concatenated along
+the channel dimension:
+
+```
+SurfaceTemp (15)  +  Elevation (1)  +  IRprecipitation (16)  =  32 channels
+```
+
+## Model
+
+`AnagnorModel` (see [model.py](model.py)) is a small convolutional binary
+classifier operating on the 32-channel raster:
+
+```
+Conv2d(32 → 12, k=3) → ReLU → MaxPool(10) → Dropout
+Conv2d(12 →  3, k=3) → ReLU → MaxPool(10) → Dropout
+Flatten → FC(300→120) → FC(120→84) → FC(84→1)
+```
+
+The final FC produces a logit; pair with `BCEWithLogitsLoss` during training and
+apply `torch.sigmoid` at inference for a landslide-probability score in [0, 1].
+
+## Training pipeline
+
+[`datasetGenerator.py`](datasetGenerator.py) builds positive and negative
+samples on the fly:
+
+* **Positive (`label = 1`)** — a real catalog event: read the date and lat/long
+  from the CSV, then extract the GISTEMP / NLDAS / TRMM windows around that
+  point and time.
+* **Negative (`label = 0`)** — a random date/location pair, sampled so the
+  model also learns what *non-events* look like.
+
+[`train.py`](train.py) does an 80/20 train/val split (seeded), trains with SGD +
+momentum and `BCEWithLogitsLoss`, tracks per-epoch loss and accuracy on both
+splits, and writes them to `checkpoints/metrics.json`. The best validation
+checkpoint is saved to `checkpoints/best.pth`.
+
+## Visualizations
+
+[`visualize.py`](visualize.py) renders both data plots and training plots
+(outputs land in `plots/`):
+
+| Plot | Source | Library |
+|---|---|---|
+| `world_map.png` — events on a Robinson world projection, coloured by trigger | landslide CSV | cartopy + seaborn |
+| `density.png` — KDE heatmap of event locations | landslide CSV | seaborn + cartopy |
+| `country_choropleth.png` — events per country on a Natural Earth choropleth | landslide CSV | geopandas + cartopy |
+| `categories.png` — top triggers and event sizes | landslide CSV | seaborn |
+| `training_curves.png` — train vs validation loss & accuracy per epoch | `checkpoints/metrics.json` | matplotlib |
+
+## Quickstart
+
+```bash
+pip install -r requirements.txt
+```
+
+Download the NetCDF inputs (the catalog CSV is already bundled):
+
+```bash
+wget https://data.giss.nasa.gov/pub/gistemp/gistemp1200_GHCNv4_ERSSTv5.nc.gz
+gunzip gistemp1200_GHCNv4_ERSSTv5.nc.gz
+# Place NLDAS.nc in the repo root, and TRMM daily files under TRMMDataset/.
+```
+
+Train:
+
+```bash
+python train.py --epochs 10 --batch-size 8
+```
+
+Plot:
+
+```bash
+python visualize.py all          # geo plots + training curves
+python visualize.py geo          # geo plots only
+python visualize.py training     # train vs validation curves only
+python main.py --date 2008-01-15 # quick-look GISTEMP anomaly map for one day
+```
+
+## Repository layout
+
+```
+.
+├── datasets/                          # NASA Global Landslide Catalog (CSV)
+├── checkpoints/                       # model weights + metrics.json (gitignored)
+├── plots/                             # generated PNGs (gitignored)
+├── tests/                             # ad-hoc inspection scripts for each NetCDF source
+├── datasetGenerator.py                # SurfaceTemp / Elevation / IRprecipitation + CustomDataset
+├── model.py                           # AnagnorModel
+├── train.py                           # training loop with train/val tracking
+├── visualize.py                       # geo + training visualizations
+├── main.py                            # CLI viewer for a single GISTEMP day
+└── requirements.txt
+```
+
+## Detailed background
+
+Watch the project walkthrough:
 https://www.youtube.com/watch?v=u5XusYBq1h0
 
-[![Anagnor](https://cdn.discordapp.com/attachments/890152800036749335/894466314763108362/Screenshot_2021-10-04_at_12.25.25_AM.png)](https://www.youtube.com/watch?v=u5XusYBq1h0 "Anagnor")
+Conventional landslide-warning systems focus on rainfall and surface-water
+erosion. Anagnor adds **uneven heating of land** (via GISTEMP anomalies),
+**precipitation history** (TRMM), and **terrain** (NLDAS elevation) into a
+single multi-channel input, on the hypothesis that the joint signal is more
+predictive than any single channel.
 
-# Features and Algorithm
-
-Unlike conventional landslide detection systems which mainly focus on rainfall and surface-water erosion, Anagnor focuses on several other factors that can also lead to major landslides like uneven heating of land, floods and earthquakes. The system can not only explain data to professional mitigation authorities but also to local people about such an imminent catastrophe.
-
-Landslides are caused when land erodes due to its soil structure, water carrying capacity and external factors like rainfall, floods, uneven heating. Erosion causing landslides generally occurs from a higher to lower slope. Anagnor integrates the data from global precipitation and thermal soil mapping datasets to find the probabability of a landslide occurring.
-
-The predictive model takes several other factors and analyzes it using 3D Convolutional Neural Networks. All four datasets are used in NetCDF format. NetCDF format is an array/matrix-like format, where the two dimensions are latitude and longitude. This is easily readable in Python and can be shown on the system that is comprehensive enough to the user.
-
-Collaborating with locals, Anagnor also provides a cost effective underground device that needs to be installed in the underground water table to predict the tectonic activities in that area. ISince tectonic activities is another major cause for landslides, Anagnor’s device helps the system get a more accurate prediction of the occurence of a landslide. However a technology that can predict tectonic activities in the present world has not really been developed, Anagnor brings a concept of achieving so by measuring and comparing concentrations of radon and its daughter products.
-
-This is done by taking radon-dissolved underground water into a degassing chamber to extract radon that will be then transported to a Lucas scintillation chamber through a tesla valve. The tesla valve just ensures that there's no reduction in fluid pressure and velocity while going from degassing chamber to the scintillation cells. In the scintillation chamber, Alpha particles emitted, will collide with the surface made up of Zinc sulphide to generate light. Such light signals can be measured through a photomultiplier tube which transfers data about probable earthquake that might cause a landslide.
-
-# User Interface
-
-Anagnor has a very user-friendly user interface that helps user to easily access data. This helps to alert the locals and the authorities in a particular location to evacuate the landslide prone area and take necessary steps to mitigate/prevent landslides. Thus saving billions of dollars worth property and thousands of lives.
-
-The only reason behind this project is to save lives and property that is damaged every year by landslides occurring all over the world. A predictive model like Anagnor helps the civilians know when a landslide might occur and thus evacuate the place in time / take steps to prevent such a grand calamity.
-
-# Tools and Programming Language Used
-
-GISTEMP 4.0, Python, React were used to develop the model and the system. The machine learning and data preprocessing models used Pandas, Numpy, Pytorch, Torchvision and NetCdf4 module. The hardware was designed on blender while all the UI design and motion graphics were made on Figma and Adobe After Effects.`
+The original project also proposed a low-cost underground radon-detection
+device — measuring radon and its daughter-product concentrations through a
+degassing chamber feeding a Lucas scintillation cell — as a means of inferring
+tectonic activity that can precede landslides. That hardware sits outside this
+repository; this codebase is the data + ML portion of the system.
